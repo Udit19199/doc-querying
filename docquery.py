@@ -897,10 +897,10 @@ def compare_between_sets(user_question=None):
 
                 # ---- fallback scores ----
                 fallback_score = get_similarity_score(
-                    st.session_state.eval_B["answer"],
+                    st.session_state.eval_A["answer"],
                     [
                         Document(page_content=c)
-                        for c in st.session_state.eval_B["contexts"]
+                        for c in st.session_state.eval_A["contexts"]
                     ],
                     "Ollama (Nomic)",
                 )
@@ -995,10 +995,10 @@ def compare_between_sets(user_question=None):
                     "Ollama (Nomic)",
                 )
 
-                answer_rel = safe_get(df_a, "answer_relevancy", fallback_score)
-                faithful = safe_get(df_a, "faithfulness", fallback_score)
-                ctx_prec = safe_get(df_a, "context_precision", fallback_score)
-                ctx_rec = safe_get(df_a, "context_recall", fallback_score)
+                answer_rel = safe_get(df_b, "answer_relevancy", fallback_score)
+                faithful = safe_get(df_b, "faithfulness", fallback_score)
+                ctx_prec = safe_get(df_b, "context_precision", fallback_score)
+                ctx_rec = safe_get(df_b, "context_recall", fallback_score)
 
                 container.metric(
                     "Answer Relevancy",
