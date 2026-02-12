@@ -1,45 +1,66 @@
 import streamlit as st
 from PyPDF2 import PdfReader
-from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 import os
 import time
-from dataset_builder import build_eval_dataset
 from sklearn.metrics.pairwise import cosine_similarity
-from langchain.embeddings import HuggingFaceEmbeddings
-from langchain_google_genai.embeddings import GoogleGenerativeAIEmbeddings
-import google.generativeai as genai
+from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_ollama import ChatOllama, OllamaEmbeddings
 import numpy as np
 import matplotlib.pyplot as plt
 import pandas as pd
 from langchain_community.vectorstores import FAISS
-from langchain.docstore.in_memory import InMemoryDocstore
-from langchain.docstore.document import Document
+from langchain_community.docstore.in_memory import InMemoryDocstore
+from langchain_core.documents import Document
 import uuid
 import shutil
-from langchain.embeddings import OpenAIEmbeddings
-from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_community.embeddings import OpenAIEmbeddings
 from langchain.chains.question_answering import load_qa_chain
 from langchain.prompts import PromptTemplate
 from dotenv import load_dotenv
-from google.api_core.exceptions import ResourceExhausted
 from docx import Document as DocxDocument
+from google.api_core.exceptions import ResourceExhausted
 import faiss
-from sentence_transformers import SentenceTransformer
+
+try:
+    from sentence_transformers import SentenceTransformer
+except ImportError:
+    SentenceTransformer = None
+
+try:
+    from dataset_builder import build_eval_dataset
+except ImportError:
+
+    def build_eval_dataset():
+        raise ImportError(
+            "dataset_builder module not found. RAGAS evaluation will be disabled."
+        )
+        return None
+
+
 from ragas.metrics import (
     answer_relevancy,
     faithfulness,
     context_precision,
     context_recall,
 )
-from langchain.text_splitter import CharacterTextSplitter
+from langchain_text_splitters import CharacterTextSplitter
 from ragas import evaluate
 from datasets import Dataset
-from eval_runner import run_eval
+
+try:
+    from eval_runner import run_eval
+except ImportError:
+
+    def run_eval():
+        raise ImportError("eval_runner module not found.")
+        return None
+
+
 import inspect
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
 from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.lib import colors
-import google.generativeai as genai
 from io import BytesIO
 import difflib
 import re
@@ -47,35 +68,55 @@ from reportlab.platypus import PageBreak
 
 
 class SafeHuggingFaceEmbeddings(HuggingFaceEmbeddings):
-    def __init__(self, model_name: str = "sentence-transformers/all-MiniLM-L6-v2", model_kwargs=None, encode_kwargs={}, **kwargs):
+    def __init__(
+        self,
+        model_name: str = "sentence-transformers/all-MiniLM-L6-v2",
+        model_kwargs=None,
+        encode_kwargs={},
+        **kwargs,
+    ):
         if model_kwargs is None:
             model_kwargs = {}
         model_kwargs["device"] = "cpu"  # force CPU
         model = SentenceTransformer(model_name_or_path=model_name, **model_kwargs)
-        super().__init__(model_name=model_name, model_kwargs=model_kwargs, encode_kwargs=encode_kwargs, **kwargs)
+        super().__init__(
+            model_name=model_name,
+            model_kwargs=model_kwargs,
+            encode_kwargs=encode_kwargs,
+            **kwargs,
+        )
         self.client = model
 
-load_dotenv()
-api_key = os.getenv("GOOGLE_API_KEY")
-if not api_key:
-    raise ValueError("GOOGLE_API_KEY not found. Make sure it's set in the .env file.")
-genai.configure(api_key=api_key)
-#genai.configure(api_key=api_key)
+
+import requests
+
+try:
+    response = requests.get("http://localhost:11434/api/tags")
+    if response.status_code != 200:
+        st.warning("Ollama server not detected. Run `ollama serve` first.")
+except Exception:
+    st.warning("Could not connect to Ollama. Ensure it's running.")
+# genai.configure(api_key=api_key)
 
 EVAL_BUFFER = []
 
-def log_for_eval(question: str, contexts, answer: str):
-    context_texts = [doc.page_content if hasattr(doc, "page_content") else str(doc) for doc in contexts]
-    EVAL_BUFFER.append({
-        "question": question,
-        "contexts": context_texts,
-        "answer": answer
-    })
 
-#@@
+def log_for_eval(question: str, contexts, answer: str):
+    context_texts = [
+        doc.page_content if hasattr(doc, "page_content") else str(doc)
+        for doc in contexts
+    ]
+    EVAL_BUFFER.append(
+        {"question": question, "contexts": context_texts, "answer": answer}
+    )
+
+
+# @@
 def run_eval():
     ds = build_eval_dataset()
-    return evaluate(ds, metrics=[faithfulness, answer_relevancy, context_precision, context_recall])
+    return evaluate(
+        ds, metrics=[faithfulness, answer_relevancy, context_precision, context_recall]
+    )
 
 
 # ---------- Helper functions (kept your logic) ----------
@@ -98,25 +139,37 @@ def get_file_text(uploaded_files):
             st.warning(f"Unsupported file type: {file_name}")
     return text
 
+
 def get_text_chunks(text, chunk_strategy):
     if chunk_strategy == "Recursive":
-        text_splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=100)
+        text_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=500, chunk_overlap=100
+        )
         return text_splitter.split_text(text)
     elif chunk_strategy == "Fixed-Size":
-        text_splitter = CharacterTextSplitter(separator="\n", chunk_size=400, chunk_overlap=100)
+        text_splitter = CharacterTextSplitter(
+            separator="\n", chunk_size=400, chunk_overlap=100
+        )
         return text_splitter.split_text(text)
     elif chunk_strategy == "Paragraph":
         paragraphs = text.split("\n\n")
         chunks = [p.strip() for p in paragraphs if p.strip()]
         if not chunks:
-            st.warning("No paragraphs found using double newlines. Falling back to Recursive splitter.")
-            text_splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=100)
+            st.warning(
+                "No paragraphs found using double newlines. Falling back to Recursive splitter."
+            )
+            text_splitter = RecursiveCharacterTextSplitter(
+                chunk_size=500, chunk_overlap=100
+            )
             return text_splitter.split_text(text)
         return chunks
     else:
         st.warning("Unknown chunking strategy selected. Defaulting to Recursive.")
-        text_splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=100)
+        text_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=500, chunk_overlap=100
+        )
         return text_splitter.split_text(text)
+
 
 def build_and_save_faiss(text_chunks, embedding_model, index_type, folder_name):
     embeddings = get_embeddings(embedding_model)
@@ -149,6 +202,7 @@ def build_and_save_faiss(text_chunks, embedding_model, index_type, folder_name):
     # ---- construct FAISS store (handle both old/new signatures) ----
     try:
         import inspect
+
         sig = inspect.signature(FAISS)
         params = set(sig.parameters.keys())
         if "embedding" in params:
@@ -196,11 +250,22 @@ def _unwrap_index(index):
     """
     try:
         # If wrapper exposes `.index` (IndexIDMap, IndexIDMap2, some wrappers)
-        if hasattr(index, "index") and getattr(index, "index") is not None and getattr(index, "index") is not index:
+        if (
+            hasattr(index, "index")
+            and getattr(index, "index") is not None
+            and getattr(index, "index") is not index
+        ):
             return _unwrap_index(getattr(index, "index"))
 
         # Common composite fields that may contain sub-index lists / single sub-index
-        for attr_name in ("shards", "indexes", "sub_indexes", "components", "sub_index", "components_"):
+        for attr_name in (
+            "shards",
+            "indexes",
+            "sub_indexes",
+            "components",
+            "sub_index",
+            "components_",
+        ):
             if hasattr(index, attr_name):
                 val = getattr(index, attr_name)
                 if isinstance(val, (list, tuple)) and val:
@@ -268,25 +333,28 @@ Answer:"""
 
     temperature = st.session_state.get("temperature", 0.5)
     try:
-        model = ChatGoogleGenerativeAI(
-        model=st.session_state.get("generating_model", "models/gemini-2.5-flash"),
-        temperature=temperature,
-    )
+        model = ChatOllama(
+            model=st.session_state.get("generating_model", "llama3.2"),
+            temperature=temperature,
+        )
 
-    except ResourceExhausted:
-        st.error("Quota exceeded for free tier. Please wait and try again later.")
+    except Exception as e:
+        st.error(f"Error with Ollama model: {str(e)}")
         return None
 
-    prompt = PromptTemplate(template=prompt_template, input_variables=["context", "question"])
+    prompt = PromptTemplate(
+        template=prompt_template, input_variables=["context", "question"]
+    )
     chain = load_qa_chain(model, chain_type="stuff", prompt=prompt)
     return chain
+
 
 def get_similarity_score(answer, context_chunks, embedding_model_name=None):
     """
     Robust similarity in [0,1] between `answer` and `context_chunks`.
     Strategy:
       1) Quick exact substring / sentence match -> 1.0
-      2) Try embeddings (prefer local HuggingFace fallback if Google quota fails)
+      2) Try embeddings (prefer local models, fallback to cloud if needed)
       3) Fuzzy ratio (difflib) as final fallback
     Returns float 0..1
     """
@@ -314,12 +382,12 @@ def get_similarity_score(answer, context_chunks, embedding_model_name=None):
         # check exact sentence-level presence
         sentences = []
         for t in texts:
-            sentences += [s.strip() for s in re.split(r'(?<=[.!?])\s+', t) if s.strip()]
+            sentences += [s.strip() for s in re.split(r"(?<=[.!?])\s+", t) if s.strip()]
         for s in sentences:
             if ans in s:
                 return 1.0
 
-        # 2) embeddings-based similarity (try local HF if Google fails or quota)
+        # 2) embeddings-based similarity (prefer local models)
         emb_attempts = []
 
         # prefer HuggingFace local (fast, avoids cloud quota); but honor requested model if explicitly asked
@@ -328,7 +396,9 @@ def get_similarity_score(answer, context_chunks, embedding_model_name=None):
             use_hf_first = False
         if use_hf_first:
             try:
-                emb = SafeHuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+                emb = SafeHuggingFaceEmbeddings(
+                    model_name="sentence-transformers/all-MiniLM-L6-v2"
+                )
                 embs = emb.embed_documents([joined, ans])
                 score = cosine_similarity([embs[0]], [embs[1]])[0][0]
                 # normalize to 0..1 (if negative map to (score+1)/2)
@@ -338,17 +408,21 @@ def get_similarity_score(answer, context_chunks, embedding_model_name=None):
             except Exception as e:
                 emb_attempts.append(("hf_failed", str(e)))
 
-        # if requested Google explicitly or HF failed, try Google embeddings (but catch quota errors)
-        if embedding_model_name == "Google (Gemini)" or not use_hf_first:
+        # if requested OpenAI explicitly or HF failed, try Ollama embeddings
+        if (
+            embedding_model_name == "Ollama (Nomic)"
+            or embedding_model_name == "OpenAI"
+            or not use_hf_first
+        ):
             try:
-                emb = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
+                emb = OllamaEmbeddings(model="nomic-embed-text")
                 embs = emb.embed_documents([joined, ans])
                 score = cosine_similarity([embs[0]], [embs[1]])[0][0]
                 if score < 0:
                     score = (score + 1.0) / 2.0
                 return round(max(0.0, min(1.0, float(score))), 4)
             except Exception as e:
-                emb_attempts.append(("google_failed", str(e)))
+                emb_attempts.append(("ollama_failed", str(e)))
 
         # 3) final fallback: difflib fuzzy match across sentences / contexts
         best = 0.0
@@ -365,6 +439,7 @@ def get_similarity_score(answer, context_chunks, embedding_model_name=None):
         st.warning(f"Similarity scoring failed (final fallback): {e}")
         return 0.0
 
+
 def extract_reference_from_contexts(answer, contexts):
     """
     Pick the single best sentence from `contexts` that most closely matches `answer`.
@@ -380,16 +455,17 @@ def extract_reference_from_contexts(answer, contexts):
     # split into sentences
     sents = []
     for t in texts:
-        sents.extend([s.strip() for s in re.split(r'(?<=[.!?])\s+', t) if s.strip()])
+        sents.extend([s.strip() for s in re.split(r"(?<=[.!?])\s+", t) if s.strip()])
 
     if not sents:
         # fallback: join contexts (trim to reasonable length)
         return (" ".join(texts)).strip()[:400]
 
     # pick the sentence with max fuzzy overlap to the answer
-    best = max(sents, key=lambda s: difflib.SequenceMatcher(None, s, answer or "").ratio())
+    best = max(
+        sents, key=lambda s: difflib.SequenceMatcher(None, s, answer or "").ratio()
+    )
     return best
-
 
 
 def save_report_as_pdf(filename, eval_dict, metrics, folder_path="."):
@@ -403,7 +479,9 @@ def save_report_as_pdf(filename, eval_dict, metrics, folder_path="."):
     story.append(Paragraph("<b>Query Evaluation Report</b>", styles["Title"]))
     story.append(Spacer(1, 12))
 
-    story.append(Paragraph(f"<b>Question:</b> {eval_dict['question']}", styles["Normal"]))
+    story.append(
+        Paragraph(f"<b>Question:</b> {eval_dict['question']}", styles["Normal"])
+    )
     story.append(Spacer(1, 12))
 
     story.append(Paragraph("<b>Answer:</b>", styles["Heading3"]))
@@ -412,7 +490,7 @@ def save_report_as_pdf(filename, eval_dict, metrics, folder_path="."):
 
     story.append(Paragraph("<b>Retrieved Contexts:</b>", styles["Heading3"]))
     for i, ctx in enumerate(eval_dict["contexts"]):
-        story.append(Paragraph(f"Context {i+1}: {ctx}", styles["Normal"]))
+        story.append(Paragraph(f"Context {i + 1}: {ctx}", styles["Normal"]))
         story.append(Spacer(1, 6))
 
     story.append(Spacer(1, 12))
@@ -423,14 +501,18 @@ def save_report_as_pdf(filename, eval_dict, metrics, folder_path="."):
         table_data.append([k, f"{v:.2f}" if isinstance(v, (int, float)) else str(v)])
 
     table = Table(table_data, colWidths=[150, 150])
-    table.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, 0), colors.grey),
-        ("TEXTCOLOR", (0, 0), (-1, 0), colors.whitesmoke),
-        ("ALIGN", (0, 0), (-1, -1), "CENTER"),
-        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-        ("BOTTOMPADDING", (0, 0), (-1, 0), 12),
-        ("GRID", (0, 0), (-1, -1), 1, colors.black),
-    ]))
+    table.setStyle(
+        TableStyle(
+            [
+                ("BACKGROUND", (0, 0), (-1, 0), colors.grey),
+                ("TEXTCOLOR", (0, 0), (-1, 0), colors.whitesmoke),
+                ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                ("BOTTOMPADDING", (0, 0), (-1, 0), 12),
+                ("GRID", (0, 0), (-1, -1), 1, colors.black),
+            ]
+        )
+    )
     story.append(table)
 
     doc = SimpleDocTemplate(file_path, pagesize=(595.27, 841.89))  # A4
@@ -444,11 +526,13 @@ def compare_across_models(user_question, index_type, chunk_strategy):
     text_chunks = get_text_chunks(raw_text, chunk_strategy)
     models_to_compare = {}
     try:
-        models_to_compare["Google (Gemini)"] = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
+        models_to_compare["Ollama (Nomic)"] = OllamaEmbeddings(model="nomic-embed-text")
     except Exception as e:
-        st.warning(f"Google Embeddings failed: {str(e)}")
+        st.warning(f"Ollama Embeddings failed: {str(e)}")
     try:
-        models_to_compare["MiniLM (HuggingFace)"] = SafeHuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+        models_to_compare["MiniLM (HuggingFace)"] = SafeHuggingFaceEmbeddings(
+            model_name="sentence-transformers/all-MiniLM-L6-v2"
+        )
     except Exception as e:
         st.error(f"HuggingFace Embeddings failed: {str(e)}")
     if os.getenv("OPENAI_API_KEY"):
@@ -491,19 +575,22 @@ def compare_across_models(user_question, index_type, chunk_strategy):
             if not chain:
                 cols[idx].error(f"Chain failed for {name}")
                 continue
-            response = chain({"input_documents": docs, "question": user_question}, return_only_outputs=True)
+            response = chain.invoke(
+                {"input_documents": docs, "question": user_question},
+                return_only_outputs=True,
+            )
             cols[idx].markdown(f"**{name}**")
             cols[idx].write(response["output_text"])
         except Exception as e:
             cols[idx].error(f"{name} failed: {str(e)}")
 
-        
+
 def rerank_chunks_llm(question, chunks, top_k=None):
     if top_k is None:
         top_k = st.session_state.get("top_k", 5)
 
-    model = ChatGoogleGenerativeAI(
-        model=st.session_state.get("generating_model", "models/gemini-2.5-flash"),
+    model = ChatOllama(
+        model=st.session_state.get("generating_model", "llama3.2"),
         temperature=0.2,
     )
 
@@ -535,22 +622,27 @@ Respond with a single number from 0 (not relevant) to 10 (highly relevant).
     top_chunks = [chunk for chunk, _ in reranked[:top_k]]
     return top_chunks
 
+
 ##
 def compare_between_sets(user_question=None):
-    
+
     cols = st.columns(2)
     eval_data = []
     chain = get_conversational_chain()
-    for i, (label, set_key, faiss_folder) in enumerate([
-        ("Set A", "setA", "faiss_setA"),
-        ("Set B", "setB", "faiss_setB"),
-    ]):
+    for i, (label, set_key, faiss_folder) in enumerate(
+        [
+            ("Set A", "setA", "faiss_setA"),
+            ("Set B", "setB", "faiss_setB"),
+        ]
+    ):
         try:
             if set_key not in st.session_state:
                 raise ValueError(f"{set_key} not configured in session_state")
             emb_model_name = st.session_state[set_key]["embedding_model"]
             emb_model = get_embeddings(emb_model_name)
-            db = FAISS.load_local(faiss_folder, emb_model, allow_dangerous_deserialization=True)
+            db = FAISS.load_local(
+                faiss_folder, emb_model, allow_dangerous_deserialization=True
+            )
             top_k = st.session_state.get("top_k", 5)
             # ---------- DEBUG: show index size and top_k requested ----------
             try:
@@ -571,21 +663,26 @@ def compare_between_sets(user_question=None):
                 base_index.nprobe = probe
             elif isinstance(base_index, faiss.IndexHNSWFlat):
                 base_index.hnsw.efSearch = max(50, top_k * 4)
-            
+
             query = user_question or ""
             docs = db.similarity_search(query, k=top_k, fetch_k=max(20, top_k * 5))
 
             if st.session_state.get("enable_rerank"):
                 with cols[i]:
-                    st.info(f"Re-ranking top {len(docs)} chunks using Gemini...")
-                docs = rerank_chunks_llm(user_question, docs, top_k=st.session_state.get("top_k", 5))
+                    st.info(f"Re-ranking top {len(docs)} chunks using Ollama...")
+                docs = rerank_chunks_llm(
+                    user_question, docs, top_k=st.session_state.get("top_k", 5)
+                )
             start_time = time.time()
-            response = chain({"input_documents": docs, "question": user_question}, return_only_outputs=True)
+            response = chain.invoke(
+                {"input_documents": docs, "question": user_question},
+                return_only_outputs=True,
+            )
             end_time = time.time()
             latency = round(end_time - start_time, 2)
-            
+
             answer_text = response["output_text"]
-    
+
             if label == "Set A":
                 st.session_state.eval_A = {
                     "question": user_question,
@@ -599,29 +696,29 @@ def compare_between_sets(user_question=None):
                     "answer": answer_text,
                 }
 
-
             # Log for evaluation
             log_for_eval(user_question, docs, answer_text)
             similarity = get_similarity_score(answer_text, docs, emb_model_name)
             cols[i].markdown(f"**{label}**")
             cols[i].write(answer_text)
 
-            eval_data.append({
-                "Set": label,
-                "Embedding": emb_model_name,
-                "Index": st.session_state[set_key]["index_type"],
-                "Chunking": st.session_state[set_key]["chunk_strategy"],
-                "Answer Length": len(answer_text),
-                "Latency (s)": latency,
-                "Relevance Score": similarity,
-            })
+            eval_data.append(
+                {
+                    "Set": label,
+                    "Embedding": emb_model_name,
+                    "Index": st.session_state[set_key]["index_type"],
+                    "Chunking": st.session_state[set_key]["chunk_strategy"],
+                    "Answer Length": len(answer_text),
+                    "Latency (s)": latency,
+                    "Relevance Score": similarity,
+                }
+            )
         except Exception as e:
             cols[i].error(f"{label} failed: {str(e)}")
 
-
     # === RAGAS evaluation (unchanged logic, but we store results into session_state so we can export them) ===
     st.markdown("RAGAS Evaluation")
-    
+
     colA, colB = st.columns(2)
 
     # Helper to format metric
@@ -629,26 +726,30 @@ def compare_between_sets(user_question=None):
         return "—" if pd.isna(val) else f"{float(val):.2f}"
 
     def my_llm_factory():
-        return ChatGoogleGenerativeAI(model="models/gemini-2.5-flash", temperature=0.0)
+        return ChatOllama(model="llama3.2", temperature=0.0)
 
     def my_embedding_factory():
-        return GoogleGenerativeAIEmbeddings(model="models/embedding-001")
+        return OllamaEmbeddings(model="nomic-embed-text")
 
     def run_ragas_on(eval_dict, label, container):
         ref_text = eval_dict.get("reference")
         if not ref_text:
-            ref_text = extract_reference_from_contexts(eval_dict.get("answer", ""), eval_dict.get("contexts", []))
+            ref_text = extract_reference_from_contexts(
+                eval_dict.get("answer", ""), eval_dict.get("contexts", [])
+            )
 
-        ds = Dataset.from_dict({
-            "question": [eval_dict.get("question", "")],
-            "contexts": [eval_dict.get("contexts", [])],
-            "answer":   [eval_dict.get("answer", "")],
-            "reference": [ref_text],
-        })
+        ds = Dataset.from_dict(
+            {
+                "question": [eval_dict.get("question", "")],
+                "contexts": [eval_dict.get("contexts", [])],
+                "answer": [eval_dict.get("answer", "")],
+                "ground_truth": [ref_text],
+            }
+        )
 
         try:
-            eval_llm = ChatGoogleGenerativeAI(
-                model=st.session_state.get("generating_model", "models/gemini-2.5-flash"),
+            eval_llm = ChatOllama(
+                model=st.session_state.get("generating_model", "llama3.2"),
                 temperature=0.0,
             )
         except Exception as e:
@@ -656,7 +757,7 @@ def compare_between_sets(user_question=None):
             return None
 
         try:
-            eval_emb = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
+            eval_emb = OllamaEmbeddings(model="nomic-embed-text")
         except Exception as e:
             container.error(f"Could not instantiate evaluation embeddings: {e}")
             return None
@@ -665,16 +766,19 @@ def compare_between_sets(user_question=None):
         emb_for_ragas = None
         try:
             from ragas.llms import LangchainLLMWrapper
+
             llm_for_ragas = LangchainLLMWrapper(eval_llm)
         except Exception:
             try:
                 from ragas.llms import LangchainLLM
+
                 llm_for_ragas = LangchainLLM(eval_llm)
             except Exception:
                 llm_for_ragas = eval_llm
 
         try:
             from ragas.embeddings import LangchainEmbeddingsWrapper
+
             emb_for_ragas = LangchainEmbeddingsWrapper(eval_emb)
         except Exception:
             emb_for_ragas = eval_emb
@@ -695,11 +799,18 @@ def compare_between_sets(user_question=None):
 
         try:
             if "llm" in params or "embeddings" in params:
-                results = evaluate(ds, metrics=metrics_list, llm=llm_for_ragas, embeddings=emb_for_ragas)
+                results = evaluate(
+                    ds,
+                    metrics=metrics_list,
+                    llm=llm_for_ragas,
+                    embeddings=emb_for_ragas,
+                )
                 return results
 
             if "llm_or_chain_factory" in params:
-                results = evaluate(ds, llm_or_chain_factory=llm_for_ragas, metrics=metrics_list)
+                results = evaluate(
+                    ds, llm_or_chain_factory=llm_for_ragas, metrics=metrics_list
+                )
                 return results
 
             if "llm_factory" in params or "embedding_factory" in params:
@@ -719,7 +830,9 @@ def compare_between_sets(user_question=None):
                 return results
 
         except ResourceExhausted as e:
-            container.warning(f"Evaluation LLM quota issue for {label}: {str(e)}. Falling back to evaluate() without custom models.")
+            container.warning(
+                f"Evaluation LLM quota issue for {label}: {str(e)}. Falling back to evaluate() without custom models."
+            )
             try:
                 results = evaluate(ds, metrics=metrics_list)
                 return results
@@ -740,26 +853,28 @@ def compare_between_sets(user_question=None):
             container.subheader("Set A")
             container.markdown(f"**Question:** {st.session_state.eval_A['question']}")
             with container.expander("Retrieved Chunks (A)", expanded=False):
-                contexts = st.session_state.eval_A.get("contexts", []) if "eval_A" in st.session_state else []
+                contexts = (
+                    st.session_state.eval_A.get("contexts", [])
+                    if "eval_A" in st.session_state
+                    else []
+                )
                 if not contexts:
                     container.write("No chunks retrieved.")
                 else:
                     sentinel = "— Select a chunk —"
-                    options = [sentinel] + [f"Chunk {i+1}" for i in range(len(contexts))]
+                    options = [sentinel] + [
+                        f"Chunk {i + 1}" for i in range(len(contexts))
+                    ]
                     selected = container.selectbox(
-                        "Preview a single chunk",
-                        options,
-                        index=0,
-                        key="select_chunk_A"
+                        "Preview a single chunk", options, index=0, key="select_chunk_A"
                     )
                     if selected != sentinel:
                         idx = options.index(selected) - 1
-                        container.markdown(f"**Chunk {idx+1}:**\n\n{contexts[idx]}")
+                        container.markdown(f"**Chunk {idx + 1}:**\n\n{contexts[idx]}")
 
                     if container.checkbox("Show all chunks", key="show_all_A"):
                         for j, c in enumerate(contexts, 1):
                             container.markdown(f"**Chunk {j}:**\n\n{c}\n\n---")
-
 
             container.markdown("**Answer:**")
             container.write(st.session_state.eval_A["answer"])
@@ -767,7 +882,7 @@ def compare_between_sets(user_question=None):
             res_a = run_ragas_on(st.session_state.eval_A, "Set A", container)
             # store ragas result for export later
             st.session_state["last_ragas_A"] = res_a
-            
+
             if res_a is not None:
                 df_a = res_a.to_pandas()
 
@@ -782,9 +897,12 @@ def compare_between_sets(user_question=None):
 
                 # ---- fallback scores ----
                 fallback_score = get_similarity_score(
-                    st.session_state.eval_A["answer"],
-                    [Document(page_content=c) for c in st.session_state.eval_A["contexts"]],
-                    "Google (Gemini)"
+                    st.session_state.eval_B["answer"],
+                    [
+                        Document(page_content=c)
+                        for c in st.session_state.eval_B["contexts"]
+                    ],
+                    "Ollama (Nomic)",
                 )
 
                 answer_rel = safe_get(df_a, "answer_relevancy", fallback_score)
@@ -793,24 +911,29 @@ def compare_between_sets(user_question=None):
                 ctx_rec = safe_get(df_a, "context_recall", fallback_score)
 
                 container.metric(
-                    "Answer Relevancy", f"{answer_rel:.2f}",
-                    help="How well the generated answer addresses the user’s question."
+                    "Answer Relevancy",
+                    f"{answer_rel:.2f}",
+                    help="How well the generated answer addresses the user’s question.",
                 )
                 container.metric(
-                    "Faithfulness", f"{faithful:.2f}",
-                    help="Does the answer stay consistent with the retrieved context."
+                    "Faithfulness",
+                    f"{faithful:.2f}",
+                    help="Does the answer stay consistent with the retrieved context.",
                 )
                 container.metric(
-                    "Context Precision", f"{ctx_prec:.2f}",
-                    help="Proportion of retrieved context that was actually relevant."
+                    "Context Precision",
+                    f"{ctx_prec:.2f}",
+                    help="Proportion of retrieved context that was actually relevant.",
                 )
                 container.metric(
-                    "Context Recall", f"{ctx_rec:.2f}",
-                    help="How much of the relevant context was captured by the retrieval."
+                    "Context Recall",
+                    f"{ctx_rec:.2f}",
+                    help="How much of the relevant context was captured by the retrieval.",
                 )
             else:
-                container.warning("RAGAS returned no results. Showing similarity fallback.")
-                
+                container.warning(
+                    "RAGAS returned no results. Showing similarity fallback."
+                )
 
     # Run for Set B
     with colB:
@@ -819,26 +942,28 @@ def compare_between_sets(user_question=None):
             container.subheader("Set B")
             container.markdown(f"**Question:** {st.session_state.eval_B['question']}")
             with container.expander("Retrieved Chunks (B)", expanded=False):
-                contexts = st.session_state.eval_B.get("contexts", []) if "eval_B" in st.session_state else []
+                contexts = (
+                    st.session_state.eval_B.get("contexts", [])
+                    if "eval_B" in st.session_state
+                    else []
+                )
                 if not contexts:
                     container.write("No chunks retrieved.")
                 else:
                     sentinel = "— Select a chunk —"
-                    options = [sentinel] + [f"Chunk {i+1}" for i in range(len(contexts))]
+                    options = [sentinel] + [
+                        f"Chunk {i + 1}" for i in range(len(contexts))
+                    ]
                     selected = container.selectbox(
-                        "Preview a single chunk",
-                        options,
-                        index=0,
-                        key="select_chunk_B"
+                        "Preview a single chunk", options, index=0, key="select_chunk_B"
                     )
                     if selected != sentinel:
                         idx = options.index(selected) - 1
-                        container.markdown(f"**Chunk {idx+1}:**\n\n{contexts[idx]}")
+                        container.markdown(f"**Chunk {idx + 1}:**\n\n{contexts[idx]}")
 
                     if container.checkbox("Show all chunks", key="show_all_B"):
                         for j, c in enumerate(contexts, 1):
                             container.markdown(f"**Chunk {j}:**\n\n{c}\n\n---")
-
 
             container.markdown("**Answer:**")
             container.write(st.session_state.eval_B["answer"])
@@ -846,7 +971,7 @@ def compare_between_sets(user_question=None):
             res_b = run_ragas_on(st.session_state.eval_B, "Set B", container)
             # store ragas result for export later
             st.session_state["last_ragas_B"] = res_b
-            
+
             #
             if res_b is not None:
                 df_b = res_b.to_pandas()
@@ -863,8 +988,11 @@ def compare_between_sets(user_question=None):
                 # ---- fallback scores ----
                 fallback_score = get_similarity_score(
                     st.session_state.eval_B["answer"],
-                    [Document(page_content=c) for c in st.session_state.eval_B["contexts"]],
-                    "Google (Gemini)"
+                    [
+                        Document(page_content=c)
+                        for c in st.session_state.eval_B["contexts"]
+                    ],
+                    "Ollama (Nomic)",
                 )
 
                 answer_rel = safe_get(df_a, "answer_relevancy", fallback_score)
@@ -873,23 +1001,29 @@ def compare_between_sets(user_question=None):
                 ctx_rec = safe_get(df_a, "context_recall", fallback_score)
 
                 container.metric(
-                    "Answer Relevancy", f"{answer_rel:.2f}",
-                    help="How well the generated answer addresses the user’s question."
+                    "Answer Relevancy",
+                    f"{answer_rel:.2f}",
+                    help="How well the generated answer addresses the user’s question.",
                 )
                 container.metric(
-                    "Faithfulness", f"{faithful:.2f}",
-                    help="Does the answer stay consistent with the retrieved context."
+                    "Faithfulness",
+                    f"{faithful:.2f}",
+                    help="Does the answer stay consistent with the retrieved context.",
                 )
                 container.metric(
-                    "Context Precision", f"{ctx_prec:.2f}",
-                    help="Proportion of retrieved context that was actually relevant."
+                    "Context Precision",
+                    f"{ctx_prec:.2f}",
+                    help="Proportion of retrieved context that was actually relevant.",
                 )
                 container.metric(
-                    "Context Recall", f"{ctx_rec:.2f}",
-                    help="How much of the relevant context was captured by the retrieval."
+                    "Context Recall",
+                    f"{ctx_rec:.2f}",
+                    help="How much of the relevant context was captured by the retrieval.",
                 )
             else:
-                container.warning("RAGAS returned no results. Showing similarity fallback.")
+                container.warning(
+                    "RAGAS returned no results. Showing similarity fallback."
+                )
 
     st.markdown("---")
     st.subheader("Export / Download Report")
@@ -903,7 +1037,7 @@ def compare_between_sets(user_question=None):
         "Which set do you want to export?",
         ["Set A", "Set B", "Both sets"],
         index=["Set A", "Set B", "Both sets"].index(st.session_state["export_choice"]),
-        key="export_dropdown"
+        key="export_dropdown",
     )
 
     # Save the current selection
@@ -911,7 +1045,11 @@ def compare_between_sets(user_question=None):
 
     # --- Helper: Build metrics (same logic)
     def build_metrics_from_ragas(ragas_result, eval_dict, embedding_model_name):
-        fallback = get_similarity_score(eval_dict.get("answer",""), eval_dict.get("contexts", []), embedding_model_name)
+        fallback = get_similarity_score(
+            eval_dict.get("answer", ""),
+            eval_dict.get("contexts", []),
+            embedding_model_name,
+        )
         default_metrics = {
             "Faithfulness": fallback,
             "Answer Relevancy": fallback,
@@ -923,11 +1061,13 @@ def compare_between_sets(user_question=None):
             return default_metrics
         try:
             df = ragas_result.to_pandas()
+
             def safe_val(col):
                 if col in df.columns and not pd.isna(df.at[0, col]):
                     return float(df.at[0, col])
                 else:
                     return fallback
+
             return {
                 "Faithfulness": safe_val("faithfulness"),
                 "Answer Relevancy": safe_val("answer_relevancy"),
@@ -943,32 +1083,44 @@ def compare_between_sets(user_question=None):
         styles = getSampleStyleSheet()
         story = []
         for label, (eval_d, metrics) in payload_dict.items():
-            story.append(Paragraph(f"<b>{label} — Query Evaluation Report</b>", styles["Title"]))
+            story.append(
+                Paragraph(f"<b>{label} — Query Evaluation Report</b>", styles["Title"])
+            )
             story.append(Spacer(1, 8))
-            story.append(Paragraph(f"<b>Question:</b> {eval_d.get('question','')}", styles["Normal"]))
+            story.append(
+                Paragraph(
+                    f"<b>Question:</b> {eval_d.get('question', '')}", styles["Normal"]
+                )
+            )
             story.append(Spacer(1, 6))
             story.append(Paragraph("<b>Answer:</b>", styles["Heading3"]))
             story.append(Paragraph(eval_d.get("answer", ""), styles["Normal"]))
             story.append(Spacer(1, 8))
             story.append(Paragraph("<b>Retrieved Contexts:</b>", styles["Heading3"]))
             for i, ctx in enumerate(eval_d.get("contexts", [])):
-                story.append(Paragraph(f"Context {i+1}:", styles["Normal"]))
+                story.append(Paragraph(f"Context {i + 1}:", styles["Normal"]))
                 story.append(Paragraph(ctx, styles["Normal"]))
                 story.append(Spacer(1, 6))
             story.append(Spacer(1, 8))
             story.append(Paragraph("<b>Evaluation Metrics:</b>", styles["Heading3"]))
             table_data = [["Metric", "Score"]]
             for k, v in metrics.items():
-                table_data.append([k, f"{v:.2f}" if isinstance(v, (int, float)) else str(v)])
+                table_data.append(
+                    [k, f"{v:.2f}" if isinstance(v, (int, float)) else str(v)]
+                )
             table = Table(table_data, colWidths=[200, 200])
-            table.setStyle(TableStyle([
-                ("BACKGROUND", (0, 0), (-1, 0), colors.grey),
-                ("TEXTCOLOR", (0, 0), (-1, 0), colors.whitesmoke),
-                ("ALIGN", (0, 0), (-1, -1), "CENTER"),
-                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-                ("BOTTOMPADDING", (0, 0), (-1, 0), 12),
-                ("GRID", (0, 0), (-1, -1), 1, colors.black),
-            ]))
+            table.setStyle(
+                TableStyle(
+                    [
+                        ("BACKGROUND", (0, 0), (-1, 0), colors.grey),
+                        ("TEXTCOLOR", (0, 0), (-1, 0), colors.whitesmoke),
+                        ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+                        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                        ("BOTTOMPADDING", (0, 0), (-1, 0), 12),
+                        ("GRID", (0, 0), (-1, -1), 1, colors.black),
+                    ]
+                )
+            )
             story.append(table)
             story.append(Spacer(1, 12))
             story.append(PageBreak())
@@ -985,7 +1137,9 @@ def compare_between_sets(user_question=None):
         eval_A = st.session_state.get("eval_A")
         ragas_A = st.session_state.get("last_ragas_A")
         if eval_A:
-            metrics_A = build_metrics_from_ragas(ragas_A, eval_A, st.session_state.setA["embedding_model"])
+            metrics_A = build_metrics_from_ragas(
+                ragas_A, eval_A, st.session_state.setA["embedding_model"]
+            )
             payload = {"Set A": (eval_A, metrics_A)}
         else:
             st.warning("No evaluation data available for Set A.")
@@ -994,7 +1148,9 @@ def compare_between_sets(user_question=None):
         eval_B = st.session_state.get("eval_B")
         ragas_B = st.session_state.get("last_ragas_B")
         if eval_B:
-            metrics_B = build_metrics_from_ragas(ragas_B, eval_B, st.session_state.setB["embedding_model"])
+            metrics_B = build_metrics_from_ragas(
+                ragas_B, eval_B, st.session_state.setB["embedding_model"]
+            )
             payload = {"Set B": (eval_B, metrics_B)}
         else:
             st.warning("No evaluation data available for Set B.")
@@ -1005,8 +1161,12 @@ def compare_between_sets(user_question=None):
         ragas_A = st.session_state.get("last_ragas_A")
         ragas_B = st.session_state.get("last_ragas_B")
         if eval_A and eval_B:
-            metrics_A = build_metrics_from_ragas(ragas_A, eval_A, st.session_state.setA["embedding_model"])
-            metrics_B = build_metrics_from_ragas(ragas_B, eval_B, st.session_state.setB["embedding_model"])
+            metrics_A = build_metrics_from_ragas(
+                ragas_A, eval_A, st.session_state.setA["embedding_model"]
+            )
+            metrics_B = build_metrics_from_ragas(
+                ragas_B, eval_B, st.session_state.setB["embedding_model"]
+            )
             payload = {"Set A": (eval_A, metrics_A), "Set B": (eval_B, metrics_B)}
         else:
             st.warning("Both Set A and Set B must be evaluated first before exporting.")
@@ -1021,25 +1181,35 @@ def compare_between_sets(user_question=None):
             mime="application/pdf",
         )
 
-    
+
 def get_embeddings(embedding_model):
-    if embedding_model == "Google (Gemini)":
-        return GoogleGenerativeAIEmbeddings(model="models/embedding-001")
+    if embedding_model == "Ollama (Nomic)":
+        return OllamaEmbeddings(model="nomic-embed-text")
     elif embedding_model == "MiniLM (HuggingFace)":
-        return SafeHuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+        return SafeHuggingFaceEmbeddings(
+            model_name="sentence-transformers/all-MiniLM-L6-v2"
+        )
     elif embedding_model == "OpenAI":
         return OpenAIEmbeddings()
     else:
-        st.warning("Unknown embedding model selected. Defaulting to Google.")
-        return GoogleGenerativeAIEmbeddings(model="models/embedding-001")
+        st.warning("Unknown embedding model selected. Defaulting to Ollama (Nomic).")
+        return OllamaEmbeddings(model="nomic-embed-text")
 
 
 def parameter_topbar():
     # defaults once
     if "setA" not in st.session_state:
-        st.session_state.setA = {"embedding_model": "Google (Gemini)", "index_type": "Flat", "chunk_strategy": "Recursive"}
+        st.session_state.setA = {
+            "embedding_model": "Ollama (Nomic)",
+            "index_type": "Flat",
+            "chunk_strategy": "Recursive",
+        }
     if "setB" not in st.session_state:
-        st.session_state.setB = {"embedding_model": "MiniLM (HuggingFace)", "index_type": "Flat", "chunk_strategy": "Recursive"}
+        st.session_state.setB = {
+            "embedding_model": "MiniLM (HuggingFace)",
+            "index_type": "Flat",
+            "chunk_strategy": "Recursive",
+        }
     if "compare_ready" not in st.session_state:
         st.session_state.compare_ready = False
     if "enable_rerank" not in st.session_state:
@@ -1052,7 +1222,7 @@ def parameter_topbar():
         st.session_state.prompt_style = "Detailed Answer"
     # NEW: generating model + vector DB (display-only single-option lists)
     if "generating_model" not in st.session_state:
-        st.session_state.generating_model = "models/gemini-2.5-flash"
+        st.session_state.generating_model = "gpt-oss:20b"
     if "vector_db" not in st.session_state:
         st.session_state.vector_db = "FAISS"
 
@@ -1071,11 +1241,15 @@ def parameter_topbar():
             )
         with rowA2:
             st.session_state.setA["chunk_strategy"] = st.selectbox(
-                "Chunking (A)", ["Recursive", "Fixed-Size", "Paragraph"], key="chunkA_top"
+                "Chunking (A)",
+                ["Recursive", "Fixed-Size", "Paragraph"],
+                key="chunkA_top",
             )
         # embedding on its own (below compact row)
         st.session_state.setA["embedding_model"] = st.selectbox(
-            "Embedding (A)", ["Google (Gemini)", "MiniLM (HuggingFace)", "OpenAI"], key="embedA_top"
+            "Embedding (A)",
+            ["Ollama (Nomic)", "MiniLM (HuggingFace)", "OpenAI"],
+            key="embedA_top",
         )
 
     # ---- SET B (compact: Index+Chunking side-by-side, Embedding below) ----
@@ -1088,10 +1262,14 @@ def parameter_topbar():
             )
         with rowB2:
             st.session_state.setB["chunk_strategy"] = st.selectbox(
-                "Chunking (B)", ["Recursive", "Fixed-Size", "Paragraph"], key="chunkB_top"
+                "Chunking (B)",
+                ["Recursive", "Fixed-Size", "Paragraph"],
+                key="chunkB_top",
             )
         st.session_state.setB["embedding_model"] = st.selectbox(
-            "Embedding (B)", ["Google (Gemini)", "MiniLM (HuggingFace)", "OpenAI"], key="embedB_top"
+            "Embedding (B)",
+            ["Ollama (Nomic)", "MiniLM (HuggingFace)", "OpenAI"],
+            key="embedB_top",
         )
 
     # ---------- COMMON PARAMETERS (full-width below top row) ----------
@@ -1114,17 +1292,24 @@ def parameter_topbar():
     with c2:
         st.session_state.prompt_style = st.selectbox(
             "Style",
-            ["Detailed Answer", "Concise Summary", "Bullet Points", "Explain Like I'm 5"],
+            [
+                "Detailed Answer",
+                "Concise Summary",
+                "Bullet Points",
+                "Explain Like I'm 5",
+            ],
             key="style_top",
         )
-        st.session_state.enable_rerank = st.checkbox("Enable re-ranking", value=st.session_state.enable_rerank, key="rerank_top")
+        st.session_state.enable_rerank = st.checkbox(
+            "Enable re-ranking", value=st.session_state.enable_rerank, key="rerank_top"
+        )
 
     # NEW: Generating model + Vector DB (single-option placeholders) in one row
     gcol, vcol = st.columns([1, 1])
     with gcol:
         st.session_state.generating_model = st.selectbox(
             "Generating model",
-            ["models/gemini-2.5-flash"],
+            ["gpt-oss:20b"],
             key="gen_model_top",
         )
         st.caption("Generative model used for answer generation (display only).")
@@ -1142,7 +1327,6 @@ def parameter_topbar():
         st.toast("Parameter sets locked. You can now upload & process.", icon="✅")
 
 
-
 # ---------- UI: minimal sidebar for uploads ----------
 def sidebar_upload_section():
     with st.sidebar:
@@ -1151,7 +1335,7 @@ def sidebar_upload_section():
             "Upload PDF, DOCX, or TXT",
             type=["pdf", "docx", "txt"],
             accept_multiple_files=True,
-            key="uploader_main"
+            key="uploader_main",
         )
 
         if st.button("Submit & Process", key="process_main"):
@@ -1167,8 +1351,10 @@ def sidebar_upload_section():
                 st.session_state["raw_text"] = raw_text
 
                 # --- Process Set A ---
-                chunksA = get_text_chunks(raw_text, st.session_state.setA["chunk_strategy"])
-                #st.write(f"DEBUG: chunksA length = {len(chunksA)}")
+                chunksA = get_text_chunks(
+                    raw_text, st.session_state.setA["chunk_strategy"]
+                )
+                # st.write(f"DEBUG: chunksA length = {len(chunksA)}")
 
                 build_and_save_faiss(
                     chunksA,
@@ -1178,8 +1364,10 @@ def sidebar_upload_section():
                 )
 
                 # --- Process Set B ---
-                chunksB = get_text_chunks(raw_text, st.session_state.setB["chunk_strategy"])
-                #st.write(f"DEBUG: chunksB length = {len(chunksB)}")
+                chunksB = get_text_chunks(
+                    raw_text, st.session_state.setB["chunk_strategy"]
+                )
+                # st.write(f"DEBUG: chunksB length = {len(chunksB)}")
 
                 build_and_save_faiss(
                     chunksB,
@@ -1189,6 +1377,7 @@ def sidebar_upload_section():
                 )
 
                 st.success("Both FAISS indexes saved.")
+
 
 def main():
     st.set_page_config(page_title="Document QA Comparison", layout="wide")
@@ -1201,11 +1390,15 @@ def main():
 
     st.markdown('<div class="main-content">', unsafe_allow_html=True)
 
-    user_question = st.text_input("Ask a question from the uploaded files", key="user_question_input")
+    user_question = st.text_input(
+        "Ask a question from the uploaded files", key="user_question_input"
+    )
     if user_question and "raw_text" in st.session_state:
         compare_between_sets(user_question)
     elif "raw_text" in st.session_state:
-        st.info("Upload complete — ask a question to run comparisons between Set A and Set B.")
+        st.info(
+            "Upload complete — ask a question to run comparisons between Set A and Set B."
+        )
 
     st.markdown("</div>", unsafe_allow_html=True)
 
